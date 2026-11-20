@@ -56,3 +56,41 @@ export async function signOut() {
   await supabase.auth.signOut();
   redirect("/");
 }
+
+/** Asegura que la serie esté en la biblioteca sin pisar cómo llegó. */
+async function ensureInLibrary(supabase: Awaited<ReturnType<typeof createClient>>, userId: string, show: LibraryInput) {
+  await supabase
+    .from("library_items")
+    .upsert({ ...show, source: show.source ?? "search", user_id: userId }, { onConflict: "user_id,media_type,tmdb_id", ignoreDuplicates: true });
+}
+
+function revalidateShow(tmdbId: number, season?: number) {
+  revalidatePath("/library");
+  revalidatePath(`/title/tv/${tmdbId}`);
+  if (season !== undefined) revalidatePath(`/title/tv/${tmdbId}/season/${season}`);
+}
+
+export async function setEpisodesWatched(show: LibraryInput, season: number, episodes: number[], watched: boolean) {
+  const supabase = await createClient();
+  const { data } = await supabase.auth.getUser();
+  if (!data.user) redirect(`/login?next=/title/tv/${show.tmdb_id}/season/${season}`);
+  if (!episodes.length) return;
+
+  if (watched) {
+    await ensureInLibrary(supabase, data.user.id, show);
+    const rows = episodes.map((episode) => ({ user_id: data.user.id, tmdb_id: show.tmdb_id, season, episode }));
+    const { error } = await supabase
+      .from("watched_episodes")
+      .upsert(rows, { onConflict: "user_id,tmdb_id,season,episode", ignoreDuplicates: true });
+    if (error) throw new Error(error.message);
+  } else {
+    const { error } = await supabase
+      .from("watched_episodes")
+      .delete()
+      .eq("tmdb_id", show.tmdb_id)
+      .eq("season", season)
+      .in("episode", episodes);
+    if (error) throw new Error(error.message);
+  }
+  revalidateShow(show.tmdb_id, season);
+}
