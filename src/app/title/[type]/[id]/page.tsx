@@ -1,0 +1,180 @@
+import type { Metadata } from "next";
+import Image from "next/image";
+import { notFound } from "next/navigation";
+import LibraryButton from "@/components/LibraryButton";
+import Notice from "@/components/Notice";
+import { getTitle, img, tmdbConfigured, type MediaType } from "@/lib/tmdb";
+import { createClient, getUser } from "@/lib/supabase/server";
+
+type Props = { params: Promise<{ type: string; id: string }> };
+
+function parse(type: string, id: string): { type: MediaType; id: number } | null {
+  const n = Number(id);
+  if ((type !== "movie" && type !== "tv") || !Number.isInteger(n) || n <= 0) return null;
+  return { type, id: n };
+}
+
+export async function generateMetadata({ params }: Props): Promise<Metadata> {
+  const { type, id } = await params;
+  const p = parse(type, id);
+  if (!p || !tmdbConfigured()) return {};
+  try {
+    const t = await getTitle(p.type, p.id);
+    return { title: t.title, description: t.overview.slice(0, 160) };
+  } catch {
+    return {};
+  }
+}
+
+export default async function TitlePage({ params }: Props) {
+  const { type, id } = await params;
+  const p = parse(type, id);
+  if (!p) notFound();
+  if (!tmdbConfigured()) return <Notice title="Falta conectar TMDB">Agrega <code>TMDB_READ_TOKEN</code> para ver las fichas.</Notice>;
+
+  let t;
+  try {
+    t = await getTitle(p.type, p.id);
+  } catch {
+    notFound();
+  }
+
+  const user = await getUser();
+  let inLibrary = false;
+  if (user) {
+    const supabase = await createClient();
+    const { data } = await supabase.from("library_items").select("id").match({ media_type: p.type, tmdb_id: p.id }).maybeSingle();
+    inLibrary = Boolean(data);
+  }
+
+  const backdrop = img(t.backdrop_path, "w1280");
+  const poster = img(t.poster_path, "w500");
+  const facts = [
+    t.media_type === "tv" ? "Serie" : "Película",
+    t.year,
+    t.runtime ? `${t.runtime} min${t.media_type === "tv" ? " por capítulo" : ""}` : null,
+    t.number_of_seasons ? `${t.number_of_seasons} temporada${t.number_of_seasons > 1 ? "s" : ""}` : null,
+  ].filter(Boolean);
+
+  return (
+    <article className="-mt-6">
+      <div className="relative -mx-4 overflow-hidden sm:rounded-b-2xl">
+        {backdrop && <Image src={backdrop} alt="" fill priority sizes="100vw" className="object-cover opacity-40" />}
+        <div className="absolute inset-0 bg-gradient-to-t from-ink via-ink/70 to-ink/20" />
+        <div className="relative flex flex-col gap-6 px-4 pb-8 pt-10 sm:flex-row sm:items-end sm:px-8 sm:pt-24">
+          <div className="relative aspect-[2/3] w-36 shrink-0 overflow-hidden rounded-xl bg-white/5 shadow-2xl ring-1 ring-white/10 sm:w-56">
+            {poster && <Image src={poster} alt={t.title} fill sizes="224px" className="object-cover" />}
+          </div>
+          <div className="min-w-0 space-y-3">
+            <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">{t.title}</h1>
+            {t.tagline && <p className="italic text-white/60">{t.tagline}</p>}
+            <p className="text-sm text-white/70">{facts.join(" · ")}</p>
+            <div className="flex flex-wrap items-center gap-2">
+              {t.vote_average > 0 && (
+                <span className="rounded-full bg-accent/15 px-3 py-1 text-sm font-semibold text-accent">★ {t.vote_average.toFixed(1)}</span>
+              )}
+              {t.genres.map((g) => (
+                <span key={g} className="rounded-full bg-white/10 px-3 py-1 text-xs text-white/80">
+                  {g}
+                </span>
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-3 pt-1">
+              <LibraryButton
+                inLibrary={inLibrary}
+                item={{ media_type: t.media_type, tmdb_id: t.id, title: t.title, poster_path: t.poster_path, backdrop_path: t.backdrop_path, year: t.year }}
+              />
+              {t.trailer_key && (
+                <a href={`https://www.youtube.com/watch?v=${t.trailer_key}`} target="_blank" rel="noreferrer" className="rounded-full bg-white/10 px-5 py-2.5 text-sm font-semibold hover:bg-white/20">
+                  ▶ Ver tráiler
+                </a>
+              )}
+              {t.imdb_id && (
+                <a href={`https://www.imdb.com/title/${t.imdb_id}/`} target="_blank" rel="noreferrer" className="text-sm text-white/60 underline-offset-4 hover:underline">
+                  IMDb
+                </a>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-8 grid gap-10 lg:grid-cols-[1fr_280px]">
+        <div className="space-y-10">
+          <section>
+            <h2 className="mb-2 text-lg font-semibold">Sinopsis</h2>
+            <p className="leading-relaxed text-white/80">{t.overview || "Sin sinopsis disponible en este idioma."}</p>
+          </section>
+
+          {t.cast.length > 0 && (
+            <section>
+              <h2 className="mb-4 text-lg font-semibold">Reparto</h2>
+              <div className="flex gap-4 overflow-x-auto pb-2">
+                {t.cast.map((c) => {
+                  const ph = img(c.profile_path, "w185");
+                  return (
+                    <div key={c.id} className="w-24 shrink-0">
+                      <div className="relative aspect-[2/3] overflow-hidden rounded-lg bg-white/5">
+                        {ph && <Image src={ph} alt={c.name} fill sizes="96px" className="object-cover" />}
+                      </div>
+                      <p className="mt-1.5 text-xs font-medium leading-tight">{c.name}</p>
+                      <p className="text-[11px] leading-tight text-white/50">{c.character}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+          {t.media_type === "tv" && t.seasons.length > 0 && (
+            <section>
+              <h2 className="mb-4 text-lg font-semibold">Temporadas</h2>
+              <ul className="divide-y divide-white/10 rounded-xl bg-panel">
+                {t.seasons.map((s) => (
+                  <li key={s.season_number} className="flex items-center justify-between px-4 py-3 text-sm">
+                    <span className="font-medium">{s.name}</span>
+                    <span className="text-white/50">
+                      {s.episode_count} capítulos{s.air_date ? ` · ${s.air_date.slice(0, 4)}` : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-2 text-xs text-white/40">El seguimiento capítulo a capítulo llega en una próxima versión.</p>
+            </section>
+          )}
+        </div>
+
+        <aside className="space-y-6">
+          {t.next_episode && (
+            <div className="rounded-xl bg-panel p-4">
+              <p className="text-xs uppercase tracking-wide text-white/40">Próximo capítulo</p>
+              <p className="mt-1 font-medium">
+                T{t.next_episode.season_number} E{t.next_episode.episode_number} · {t.next_episode.name}
+              </p>
+              <p className="text-sm text-accent">{t.next_episode.air_date}</p>
+            </div>
+          )}
+          <div className="rounded-xl bg-panel p-4">
+            <p className="text-xs uppercase tracking-wide text-white/40">Dónde ver</p>
+            {t.providers.length ? (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {t.providers.map((pr) => (
+                  <Image key={pr.provider_id} src={img(pr.logo_path, "w185")!} alt={pr.provider_name} title={pr.provider_name} width={40} height={40} className="rounded-lg" />
+                ))}
+              </div>
+            ) : (
+              <p className="mt-1 text-sm text-white/60">Sin datos de streaming en tu región.</p>
+            )}
+            <p className="mt-3 text-[11px] text-white/30">Datos de JustWatch vía TMDB</p>
+          </div>
+          {t.status && (
+            <div className="rounded-xl bg-panel p-4 text-sm">
+              <p className="text-xs uppercase tracking-wide text-white/40">Estado</p>
+              <p className="mt-1">{t.status}</p>
+            </div>
+          )}
+        </aside>
+      </div>
+    </article>
+  );
+}
