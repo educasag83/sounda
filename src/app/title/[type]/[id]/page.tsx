@@ -1,7 +1,10 @@
 import type { Metadata } from "next";
 import Image from "next/image";
 import { notFound } from "next/navigation";
+import Link from "next/link";
+import EpisodeCheck from "@/components/EpisodeCheck";
 import LibraryButton from "@/components/LibraryButton";
+import { computeProgress, type Watched } from "@/lib/progress";
 import Notice from "@/components/Notice";
 import { getTitle, img, tmdbConfigured, type MediaType } from "@/lib/tmdb";
 import { createClient, getUser } from "@/lib/supabase/server";
@@ -41,11 +44,18 @@ export default async function TitlePage({ params }: Props) {
 
   const user = await getUser();
   let inLibrary = false;
+  let watched: Watched[] = [];
   if (user) {
     const supabase = await createClient();
     const { data } = await supabase.from("library_items").select("id").match({ media_type: p.type, tmdb_id: p.id }).maybeSingle();
     inLibrary = Boolean(data);
+    if (p.type === "tv") {
+      const { data: rows } = await supabase.from("watched_episodes").select("season,episode").eq("tmdb_id", p.id);
+      watched = rows ?? [];
+    }
   }
+  const progress = t.media_type === "tv" && user ? computeProgress(t, watched) : null;
+  const libItem = { media_type: t.media_type, tmdb_id: t.id, title: t.title, poster_path: t.poster_path, backdrop_path: t.backdrop_path, year: t.year };
 
   const backdrop = img(t.backdrop_path, "w1280");
   const poster = img(t.poster_path, "w500");
@@ -80,10 +90,7 @@ export default async function TitlePage({ params }: Props) {
               ))}
             </div>
             <div className="flex flex-wrap items-center gap-3 pt-1">
-              <LibraryButton
-                inLibrary={inLibrary}
-                item={{ media_type: t.media_type, tmdb_id: t.id, title: t.title, poster_path: t.poster_path, backdrop_path: t.backdrop_path, year: t.year }}
-              />
+              <LibraryButton inLibrary={inLibrary} item={libItem} />
               {t.trailer_key && (
                 <a href={`https://www.youtube.com/watch?v=${t.trailer_key}`} target="_blank" rel="noreferrer" className="rounded-full bg-white/10 px-5 py-2.5 text-sm font-semibold hover:bg-white/20">
                   ▶ Ver tráiler
@@ -128,18 +135,46 @@ export default async function TitlePage({ params }: Props) {
 
           {t.media_type === "tv" && t.seasons.length > 0 && (
             <section>
-              <h2 className="mb-4 text-lg font-semibold">Temporadas</h2>
+              <div className="mb-4 flex flex-wrap items-end justify-between gap-2">
+                <h2 className="text-lg font-semibold">Temporadas</h2>
+                {progress && progress.aired > 0 && (
+                  <p className="text-sm text-white/60">
+                    {progress.watched} de {progress.aired} capítulos vistos
+                  </p>
+                )}
+              </div>
+              {progress && progress.aired > 0 && (
+                <div className="mb-4 h-1.5 overflow-hidden rounded-full bg-white/10">
+                  <div className="h-full rounded-full bg-accent" style={{ width: `${Math.round((progress.watched / progress.aired) * 100)}%` }} />
+                </div>
+              )}
+              {progress?.next && (
+                <div className="mb-4 flex items-center justify-between gap-3 rounded-xl bg-accent/10 p-4 ring-1 ring-accent/30">
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-accent">{progress.watched ? "Te toca" : "Empieza por"}</p>
+                    <Link href={`/title/tv/${t.id}/season/${progress.next.season}`} className="font-medium hover:underline">
+                      Temporada {progress.next.season}, capítulo {progress.next.episode}
+                    </Link>
+                  </div>
+                  <EpisodeCheck key={`${progress.next.season}x${progress.next.episode}`} variant="pill" show={libItem} season={progress.next.season} episodes={[progress.next.episode]} watched={false} />
+                </div>
+              )}
               <ul className="divide-y divide-white/10 rounded-xl bg-panel">
-                {t.seasons.map((s) => (
-                  <li key={s.season_number} className="flex items-center justify-between px-4 py-3 text-sm">
-                    <span className="font-medium">{s.name}</span>
-                    <span className="text-white/50">
-                      {s.episode_count} capítulos{s.air_date ? ` · ${s.air_date.slice(0, 4)}` : ""}
-                    </span>
-                  </li>
-                ))}
+                {t.seasons.map((s) => {
+                  const seen = watched.filter((w) => w.season === s.season_number).length;
+                  return (
+                    <li key={s.season_number}>
+                      <Link href={`/title/tv/${t.id}/season/${s.season_number}`} className="flex items-center justify-between gap-3 px-4 py-3 text-sm hover:bg-white/5">
+                        <span className="font-medium">{s.name}</span>
+                        <span className="text-white/50">
+                          {user ? `${seen}/${s.episode_count} vistos` : `${s.episode_count} capítulos`}
+                          {s.air_date ? ` · ${s.air_date.slice(0, 4)}` : ""} ›
+                        </span>
+                      </Link>
+                    </li>
+                  );
+                })}
               </ul>
-              <p className="mt-2 text-xs text-white/40">El seguimiento capítulo a capítulo llega en una próxima versión.</p>
             </section>
           )}
         </div>
@@ -170,7 +205,7 @@ export default async function TitlePage({ params }: Props) {
           {t.status && (
             <div className="rounded-xl bg-panel p-4 text-sm">
               <p className="text-xs uppercase tracking-wide text-white/40">Estado</p>
-              <p className="mt-1">{t.status}</p>
+              <p className="mt-1">{STATUS[t.status] ?? t.status}</p>
             </div>
           )}
         </aside>
@@ -178,3 +213,14 @@ export default async function TitlePage({ params }: Props) {
     </article>
   );
 }
+
+const STATUS: Record<string, string> = {
+  Ended: "Finalizada",
+  "Returning Series": "En emisión",
+  Canceled: "Cancelada",
+  "In Production": "En producción",
+  Planned: "Anunciada",
+  Released: "Estrenada",
+  "Post Production": "En posproducción",
+  Rumored: "Rumoreada",
+};

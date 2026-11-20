@@ -9,7 +9,7 @@ Web app (instalable en el móvil) para descubrir qué serie o película estás v
 | 1 | Elegir cómo reconocer el contenido | Hecho: por diálogos con IA |
 | 2 | Web base: búsqueda, fichas TMDB, login y biblioteca | Hecho |
 | 3 | Botón "Escuchar": micrófono → texto → IA → TMDB → biblioteca | Hecho |
-| 4 | Seguimiento de capítulos estilo TV Time | Pendiente |
+| 4 | Seguimiento de capítulos estilo TV Time | Hecho |
 
 ## Tecnología
 
@@ -32,7 +32,7 @@ Costo estimado: alrededor de 1 a 3 centavos de dólar por reconocimiento (estima
 
 1. **TMDB**: crea una cuenta en themoviedb.org, ve a *Settings → API* y copia el **API Read Access Token**.
 2. **Supabase**: crea un proyecto en supabase.com.
-   - En *SQL Editor*, pega y ejecuta `supabase/migrations/0001_library.sql` y después `0002_recognitions.sql`.
+   - En *SQL Editor*, pega y ejecuta `supabase/migrations/0001_library.sql` y después `0002_recognitions.sql` y `0003_watched_episodes.sql`.
    - En *Authentication → URL Configuration*, pon tu dominio (por ejemplo `https://sounda.vercel.app`) como *Site URL* y agrega `https://TU-DOMINIO/auth/callback` en *Redirect URLs* (y `http://localhost:3000/auth/callback` para pruebas locales).
    - En *Project Settings → API* copia la URL y la `anon` key.
 3. **Claude**: crea una API key en console.anthropic.com y carga algo de saldo.
@@ -41,6 +41,13 @@ Costo estimado: alrededor de 1 a 3 centavos de dólar por reconocimiento (estima
 6. Producción: importa el repositorio en Vercel y carga las mismas variables de entorno.
 
 Sin las variables la web arranca igual y muestra un aviso de qué falta conectar.
+
+## Seguimiento de capítulos
+
+- En cada temporada (`/title/tv/ID/season/N`) marcas los capítulos vistos uno a uno o la temporada entera.
+- La ficha de la serie muestra tu progreso y el capítulo que te toca.
+- La biblioteca tiene "Continuar viendo" (con botón para marcar el siguiente) y "Próximos estrenos" de tus series.
+- Si el reconocimiento identifica el capítulo exacto, lo marca como visto.
 
 ## Estructura
 
@@ -51,4 +58,5 @@ Sin las variables la web arranca igual y muestra un aviso de qué falta conectar
 - `src/lib/identify.ts`: la consulta a Claude que adivina el título.
 - `src/app/api/recognize`: une Claude, TMDB y la biblioteca.
 - `src/components/Listen.tsx`: el botón de escuchar.
+- `src/lib/progress.ts`: calcula capítulos vistos y cuál toca.
 - `src/app/library`: la biblioteca del usuario. Lo que llegue por reconocimiento se marca como "Descubierto".
