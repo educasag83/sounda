@@ -17,13 +17,15 @@ import { addToLibrary } from "@/app/actions";
 import type { GraphNode } from "@/lib/tmdb";
 
 type SimNode = SimulationNodeDatum & { key: string; data: GraphNode; r: number; phase: number };
-type SimLink = SimulationLinkDatum<SimNode> & { key: string };
+type SimLink = SimulationLinkDatum<SimNode> & { key: string; via?: string };
 
 const MAX_NODES = 140;
 const IMG = "https://image.tmdb.org/t/p/w185";
 const COLORS = { tv: "#3ee6b0", movie: "#f5b942" } as const;
 const KIND_LABEL = { tv: "Serie", movie: "Película" } as const;
 const LEGEND = { tv: "Series", movie: "Películas" } as const;
+// Conexiones por protagonistas o creador.
+const PEOPLE_COLOR = "#b49cff";
 
 function radius(isRoot: boolean) {
   return isRoot ? 46 : 31;
@@ -103,7 +105,7 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
       const key = [parentKey, data.key].sort().join("|");
       if (!linkKeys.has(key)) {
         linkKeys.add(key);
-        links.push({ key, source: parent, target: n });
+        links.push({ key, source: parent, target: n, via: data.via });
       }
     });
     const sim = simRef.current;
@@ -394,8 +396,9 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
                   if (el) linkEls.current.set(l.key, el);
                   else linkEls.current.delete(l.key);
                 }}
-                stroke={on ? "#3ee6b0" : "rgba(255,255,255,0.14)"}
+                stroke={l.via ? (on ? PEOPLE_COLOR : "rgba(180,156,255,0.35)") : on ? "#3ee6b0" : "rgba(255,255,255,0.14)"}
                 strokeWidth={on ? 2 : 1.2}
+                strokeDasharray={l.via ? "5 4" : undefined}
               />
             );
           })}
@@ -454,6 +457,11 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
                 >
                   {n.data.label}
                 </span>
+                {n.data.via && (
+                  <span className="pointer-events-none line-clamp-1 w-[110px] text-center text-[10px] leading-tight [text-shadow:0_1px_3px_#000]" style={{ color: PEOPLE_COLOR }}>
+                    {n.data.via}
+                  </span>
+                )}
               </div>
             </div>
           );
@@ -476,10 +484,16 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
               {LEGEND[k]}
             </span>
           ))}
+          <span className="flex items-center gap-1.5">
+            <svg width="14" height="4" aria-hidden>
+              <line x1="0" y1="2" x2="14" y2="2" stroke={PEOPLE_COLOR} strokeWidth="2" strokeDasharray="4 3" />
+            </svg>
+            Elenco o creador
+          </span>
         </div>
       </div>
 
-      <div className="pointer-events-none absolute right-3 top-14 flex flex-col gap-2">
+      <div className="pointer-events-none absolute right-3 top-28 flex flex-col gap-2">
         {[
           { label: "Acercar", text: "+", f: 1.3 },
           { label: "Alejar", text: "−", f: 1 / 1.3 },
@@ -514,7 +528,7 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
       </div>
 
       {hint && (
-        <p className="pointer-events-none absolute inset-x-0 top-14 mx-auto w-fit max-w-[70%] rounded-full bg-ink/70 px-3 py-1.5 text-center text-xs text-white/70">
+        <p className="pointer-events-none absolute inset-x-0 top-28 mx-auto w-fit max-w-[70%] rounded-full bg-ink/70 px-3 py-1.5 text-center text-xs text-white/70">
           Toca un círculo para ver sus conexiones
         </p>
       )}
@@ -574,7 +588,7 @@ function NodeCard({
               ? "Buscando conexiones…"
               : failed
                 ? "No pude cargar sus conexiones."
-                : `${node.year ? node.year + " · " : ""}Alrededor: sus parecidas`}
+                : [node.year, node.via].filter(Boolean).join(" · ") || "Toca otro círculo para seguir"}
           </p>
           {failed && (
             <button onClick={retry} className="text-xs font-semibold text-accent">

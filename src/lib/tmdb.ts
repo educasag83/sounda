@@ -245,6 +245,8 @@ export type GraphNode = {
   backdrop: string | null;
   year: string;
   rating: number;
+  /** Por qué está conectado: "con Jason Sudeikis", "de Bill Lawrence". Vacío si es una parecida. */
+  via?: string;
 };
 
 // Programas de entrevistas, noticias y realities no son buenas recomendaciones.
@@ -265,20 +267,64 @@ function titleNode(r: Raw, fallbackType?: MediaType): GraphNode {
   };
 }
 
-/** Un título y sus vecinos: series o películas recomendadas y parecidas. */
+type Person = { id: number; name: string; role: "cast" | "creator" };
+
+/** Los títulos más conocidos de una persona, como actor o como creador/director. */
+async function personTitles(p: Person): Promise<GraphNode[]> {
+  try {
+    const r = await tmdb<Raw>(`/person/${p.id}/combined_credits`, {}, 86400);
+    const pool: Raw[] =
+      p.role === "cast"
+        ? (r.cast ?? []).filter((c: Raw) => !/^(self|himself|herself|narrator|voice)/i.test(c.character ?? ""))
+        : (r.crew ?? []).filter((c: Raw) => ["Creator", "Director", "Writer", "Screenplay", "Executive Producer"].includes(c.job));
+    const via = p.role === "cast" ? `con ${p.name}` : `de ${p.name}`;
+    return pool
+      .filter((c) => (c.media_type === "movie" || c.media_type === "tv") && c.poster_path && (c.vote_count ?? 0) >= 20)
+      .filter((c) => !(c.genre_ids ?? []).some((g: number) => NOISY_GENRES.has(g)))
+      .sort((a, b) => (b.vote_count ?? 0) - (a.vote_count ?? 0))
+      .slice(0, 8)
+      .map((c) => ({ ...titleNode(c), via }));
+  } catch {
+    return [];
+  }
+}
+
+/** Un título y sus vecinos: parecidas, más otros títulos de sus protagonistas y de quien lo creó o dirigió. */
 export async function getTitleNeighbors(type: MediaType, id: number): Promise<{ node: GraphNode; neighbors: GraphNode[] }> {
-  const r = await tmdb<Raw>(`/${type}/${id}`, { append_to_response: "recommendations,similar" }, 86400);
+  const r = await tmdb<Raw>(`/${type}/${id}`, { append_to_response: "recommendations,similar,credits" }, 86400);
   const node = titleNode(r, type);
   const seen = new Set<string>([node.key]);
-  const neighbors: GraphNode[] = [];
+  const similar: GraphNode[] = [];
   const pool: Raw[] = [...(r.recommendations?.results ?? []), ...(r.similar?.results ?? [])];
   for (const raw of pool) {
-    if (neighbors.length >= 10) break;
+    if (similar.length >= 7) break;
     if (!raw.poster_path || (raw.genre_ids ?? []).some((g: number) => NOISY_GENRES.has(g))) continue;
     const n = titleNode(raw, type);
     if (seen.has(n.key)) continue;
     seen.add(n.key);
-    neighbors.push(n);
+    similar.push(n);
   }
-  return { node, neighbors };
+
+  const leads: Person[] = (r.credits?.cast ?? []).slice(0, 3).map((c: Raw) => ({ id: c.id, name: c.name, role: "cast" as const }));
+  const makers: Person[] = (
+    type === "tv" ? (r.created_by ?? []) : (r.credits?.crew ?? []).filter((c: Raw) => c.job === "Director")
+  )
+    .slice(0, 1)
+    .map((c: Raw) => ({ id: c.id, name: c.name, role: "creator" as const }));
+  const people = [...leads, ...makers.filter((m) => !leads.some((l) => l.id === m.id))];
+  const lists = await Promise.all(people.map(personTitles));
+  // Dos títulos por persona, sin repetir los que ya están en el mapa.
+  const byPerson: GraphNode[] = [];
+  for (const list of lists) {
+    let taken = 0;
+    for (const n of list) {
+      if (taken >= 2) break;
+      if (seen.has(n.key)) continue;
+      seen.add(n.key);
+      byPerson.push(n);
+      taken++;
+    }
+  }
+
+  return { node, neighbors: [...similar, ...byPerson] };
 }
