@@ -1,6 +1,6 @@
 import "server-only";
 
-const API = "https://api.themoviedb.org/3";
+const API = process.env.TMDB_API_BASE || "https://api.themoviedb.org/3";
 const IMG = "https://image.tmdb.org/t/p";
 
 export type MediaType = "movie" | "tv";
@@ -30,6 +30,7 @@ export type TitleDetails = SearchResult & {
   number_of_seasons: number | null;
   number_of_episodes: number | null;
   next_episode: { season_number: number; episode_number: number; name: string; air_date: string } | null;
+  last_episode: { season_number: number; episode_number: number } | null;
   trailer_key: string | null;
   providers: Provider[];
   imdb_id: string | null;
@@ -112,6 +113,7 @@ export async function getTitle(type: MediaType, id: number): Promise<TitleDetail
     number_of_seasons: r.number_of_seasons ?? null,
     number_of_episodes: r.number_of_episodes ?? null,
     next_episode: r.next_episode_to_air ?? null,
+    last_episode: r.last_episode_to_air ?? null,
     trailer_key: trailer?.key ?? null,
     providers: prov?.flatrate ?? [],
     imdb_id: r.imdb_id ?? r.external_ids?.imdb_id ?? null,
@@ -134,6 +136,29 @@ export async function getEpisode(tvId: number, season: number, episode: number):
   try {
     const r = await tmdb<Raw>(`/tv/${tvId}/season/${season}/episode/${episode}`);
     return { season_number: r.season_number, episode_number: r.episode_number, name: r.name, still_path: r.still_path, air_date: r.air_date };
+  } catch {
+    return null;
+  }
+}
+
+export type SeasonEpisode = Episode & { overview: string; runtime: number | null };
+
+export async function getSeason(tvId: number, season: number): Promise<{ name: string; overview: string; episodes: SeasonEpisode[] } | null> {
+  try {
+    const r = await tmdb<Raw>(`/tv/${tvId}/season/${season}`);
+    return {
+      name: r.name,
+      overview: r.overview || "",
+      episodes: (r.episodes ?? []).map((e: Raw) => ({
+        season_number: e.season_number,
+        episode_number: e.episode_number,
+        name: e.name,
+        overview: e.overview || "",
+        still_path: e.still_path ?? null,
+        air_date: e.air_date ?? null,
+        runtime: e.runtime ?? null,
+      })),
+    };
   } catch {
     return null;
   }

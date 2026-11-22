@@ -89,6 +89,15 @@ export async function POST(request: Request) {
       { onConflict: "user_id,media_type,tmdb_id" },
     );
     saved = !error;
+    // Si reconoció el capítulo exacto, lo marca como visto (lo estás viendo ahora).
+    if (saved && best.media_type === "tv" && best.season && best.episode) {
+      await supabase
+        .from("watched_episodes")
+        .upsert(
+          { user_id: auth.user.id, tmdb_id: best.tmdb_id, season: best.season, episode: best.episode },
+          { onConflict: "user_id,tmdb_id,season,episode", ignoreDuplicates: true },
+        );
+    }
   }
 
   return NextResponse.json({ matches, saved });
