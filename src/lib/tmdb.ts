@@ -117,3 +117,24 @@ export async function getTitle(type: MediaType, id: number): Promise<TitleDetail
     imdb_id: r.imdb_id ?? r.external_ids?.imdb_id ?? null,
   };
 }
+
+/** Busca la mejor coincidencia en TMDB para un título adivinado. */
+export async function findTitle(type: MediaType, title: string, year: number | null): Promise<SearchResult | null> {
+  const params: Record<string, string> = { query: title, include_adult: "false" };
+  if (year) params[type === "movie" ? "primary_release_year" : "first_air_date_year"] = String(year);
+  let data = await tmdb<{ results: Raw[] }>(`/search/${type}`, params, 600);
+  if (!data.results.length && year) data = await tmdb<{ results: Raw[] }>(`/search/${type}`, { query: title }, 600);
+  const first = data.results[0];
+  return first ? normalize(first, type) : null;
+}
+
+export type Episode = { season_number: number; episode_number: number; name: string; still_path: string | null; air_date: string | null };
+
+export async function getEpisode(tvId: number, season: number, episode: number): Promise<Episode | null> {
+  try {
+    const r = await tmdb<Raw>(`/tv/${tvId}/season/${season}/episode/${episode}`);
+    return { season_number: r.season_number, episode_number: r.episode_number, name: r.name, still_path: r.still_path, air_date: r.air_date };
+  } catch {
+    return null;
+  }
+}
