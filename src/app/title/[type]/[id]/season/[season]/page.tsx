@@ -3,6 +3,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import EpisodeCheck from "@/components/EpisodeCheck";
+import { formatDate } from "@/lib/dates";
 import { getSeason, getTitle, img, tmdbConfigured } from "@/lib/tmdb";
 import { createClient, getUser } from "@/lib/supabase/server";
 
@@ -91,7 +92,7 @@ export default async function SeasonPage({ params }: Props) {
               <div className="min-w-0 flex-1">
                 <p className="text-xs text-white/40">
                   T{e.season_number} E{e.episode_number}
-                  {e.air_date ? ` · ${e.air_date}` : ""}
+                  {e.air_date ? ` · ${formatDate(e.air_date)}` : ""}
                   {e.runtime ? ` · ${e.runtime} min` : ""}
                 </p>
                 <p className="font-medium leading-tight">{e.name}</p>

@@ -8,6 +8,7 @@ import EpisodeCheck from "@/components/EpisodeCheck";
 import { computeProgress, type Progress, type Watched } from "@/lib/progress";
 import { getTitle, img, tmdbConfigured, type TitleDetails } from "@/lib/tmdb";
 import { createClient, getUser, supabaseConfigured } from "@/lib/supabase/server";
+import { formatDate, fromNow } from "@/lib/dates";
 
 export const dynamic = "force-dynamic";
 
@@ -52,9 +53,18 @@ export default async function LibraryPage({ searchParams }: { searchParams: Prom
     });
   }
   const continuing = tracked.filter((t) => t.progress.next && t.progress.watched > 0);
+  // Próximos estrenos: el siguiente capítulo con fecha o, si no hay, la próxima temporada anunciada.
   const upcoming = tracked
-    .filter((t) => t.show.next_episode?.air_date)
-    .sort((a, b) => a.show.next_episode!.air_date.localeCompare(b.show.next_episode!.air_date));
+    .map(({ show }) => {
+      const ep = show.next_episode;
+      if (ep?.air_date) return { show, date: ep.air_date as string | null, label: `T${ep.season_number} E${ep.episode_number} · ${ep.name}` };
+      const s = show.upcoming_season;
+      if (s) return { show, date: s.air_date, label: `${s.name} · estreno de temporada` };
+      return null;
+    })
+    .filter((u): u is { show: TitleDetails; date: string | null; label: string } => u !== null)
+    .sort((a, b) => (a.date ?? "9999").localeCompare(b.date ?? "9999"));
+  const airingIds = new Set(tracked.filter((t) => t.show.airing).map((t) => t.show.id));
 
   const tabs = [
     { label: "Todo", value: undefined },
@@ -122,17 +132,32 @@ export default async function LibraryPage({ searchParams }: { searchParams: Prom
         <section>
           <h2 className="mb-3 text-lg font-semibold">Próximos estrenos</h2>
           <ul className="divide-y divide-white/10 rounded-xl bg-panel">
-            {upcoming.map(({ show }) => (
-              <li key={show.id}>
-                <Link href={`/title/tv/${show.id}`} className="flex items-center justify-between gap-3 px-4 py-3 text-sm hover:bg-white/5">
-                  <span className="min-w-0">
-                    <span className="font-medium">{show.title}</span>
-                    <span className="text-white/50"> · T{show.next_episode!.season_number} E{show.next_episode!.episode_number}</span>
-                  </span>
-                  <span className="shrink-0 text-accent">{formatDate(show.next_episode!.air_date)}</span>
-                </Link>
-              </li>
-            ))}
+            {upcoming.map(({ show, date, label }) => {
+              const poster = img(show.poster_path, "w185");
+              return (
+                <li key={show.id}>
+                  <Link href={`/title/tv/${show.id}`} className="flex items-center gap-3 px-4 py-3 text-sm hover:bg-white/5">
+                    <div className="relative aspect-[2/3] w-10 shrink-0 overflow-hidden rounded bg-white/5">
+                      {poster && <Image src={poster} alt="" fill sizes="40px" className="object-cover" />}
+                    </div>
+                    <span className="min-w-0 flex-1">
+                      <span className="block font-medium">{show.title}</span>
+                      <span className="block truncate text-white/50">{label}</span>
+                    </span>
+                    <span className="shrink-0 text-right">
+                      {date ? (
+                        <>
+                          <span className="block font-semibold text-accent">{fromNow(date)}</span>
+                          <span className="block text-xs text-white/50">{formatDate(date)}</span>
+                        </>
+                      ) : (
+                        <span className="block text-xs text-white/50">Sin fecha</span>
+                      )}
+                    </span>
+                  </Link>
+                </li>
+              );
+            })}
           </ul>
         </section>
       )}
@@ -154,6 +179,7 @@ export default async function LibraryPage({ searchParams }: { searchParams: Prom
               year={it.year}
               poster_path={it.poster_path}
               badge={it.source === "recognition" ? "🎙 Descubierto" : undefined}
+              airing={it.media_type === "tv" && airingIds.has(it.tmdb_id)}
             />
           ))}
         </PosterGrid>
@@ -162,7 +188,3 @@ export default async function LibraryPage({ searchParams }: { searchParams: Prom
   );
 }
 
-function formatDate(iso: string) {
-  const d = new Date(`${iso}T12:00:00`);
-  return d.toLocaleDateString("es-UY", { weekday: "short", day: "numeric", month: "short" });
-}
