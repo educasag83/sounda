@@ -228,3 +228,97 @@ export async function getSeason(tvId: number, season: number): Promise<{ name: s
     return null;
   }
 }
+
+/* ---------- Explorar: grafo de títulos y personas ---------- */
+
+export type GraphKind = MediaType | "person";
+
+export type GraphNode = {
+  /** Clave única: "tv-1399", "movie-603", "person-287". */
+  key: string;
+  kind: GraphKind;
+  id: number;
+  label: string;
+  /** Año para títulos; "Actor/Actriz" o personaje para personas. */
+  sub: string;
+  image: string | null;
+  backdrop: string | null;
+  year: string;
+  rating: number;
+};
+
+// Programas de entrevistas, noticias y realities ensucian las conexiones de los actores.
+const NOISY_GENRES = new Set([10763, 10764, 10767]);
+
+function titleNode(r: Raw, fallbackType?: MediaType): GraphNode {
+  const t = normalize(r, fallbackType);
+  return {
+    key: `${t.media_type}-${t.id}`,
+    kind: t.media_type,
+    id: t.id,
+    label: t.title,
+    sub: [t.media_type === "tv" ? "Serie" : "Película", t.year].filter(Boolean).join(" · "),
+    image: t.poster_path,
+    backdrop: t.backdrop_path,
+    year: t.year,
+    rating: t.vote_average,
+  };
+}
+
+function personNode(r: Raw, sub: string): GraphNode {
+  return { key: `person-${r.id}`, kind: "person", id: r.id, label: r.name, sub, image: r.profile_path ?? null, backdrop: null, year: "", rating: 0 };
+}
+
+/** Un título y sus vecinos: recomendados, parecidos y su reparto principal. */
+export async function getTitleNeighbors(type: MediaType, id: number): Promise<{ node: GraphNode; neighbors: GraphNode[] }> {
+  const r = await tmdb<Raw>(`/${type}/${id}`, { append_to_response: "credits,recommendations,similar" }, 86400);
+  const node = titleNode(r, type);
+  const seen = new Set<string>([node.key]);
+  const titles: GraphNode[] = [];
+  const pool: Raw[] = [...(r.recommendations?.results ?? []), ...(r.similar?.results ?? [])];
+  for (const raw of pool) {
+    if (titles.length >= 9) break;
+    if (!raw.poster_path || (raw.genre_ids ?? []).some((g: number) => NOISY_GENRES.has(g))) continue;
+    const n = titleNode(raw, type);
+    if (seen.has(n.key)) continue;
+    seen.add(n.key);
+    titles.push(n);
+  }
+  const people: GraphNode[] = (r.credits?.cast ?? [])
+    .filter((c: Raw) => c.profile_path)
+    .slice(0, 5)
+    .map((c: Raw) => personNode(c, c.character ? `como ${c.character}` : "Reparto"));
+  return { node, neighbors: interleave(titles, people) };
+}
+
+/** Una persona y los títulos más conocidos en los que actuó. */
+export async function getPersonNeighbors(id: number): Promise<{ node: GraphNode; neighbors: GraphNode[] }> {
+  const r = await tmdb<Raw>(`/person/${id}`, { append_to_response: "combined_credits" }, 86400);
+  const node = personNode(r, r.known_for_department === "Acting" ? "Actuación" : r.known_for_department || "Persona");
+  const seen = new Set<string>();
+  const credits: Raw[] = (r.combined_credits?.cast ?? [])
+    .filter((c: Raw) => (c.media_type === "movie" || c.media_type === "tv") && c.poster_path)
+    .filter((c: Raw) => !(c.genre_ids ?? []).some((g: number) => NOISY_GENRES.has(g)))
+    .filter((c: Raw) => !/^(self|himself|herself|narrator|voice)/i.test(c.character ?? ""))
+    .sort((a: Raw, b: Raw) => (b.vote_count ?? 0) - (a.vote_count ?? 0));
+  const neighbors: GraphNode[] = [];
+  for (const c of credits) {
+    if (neighbors.length >= 10) break;
+    const n = titleNode(c);
+    if (seen.has(n.key)) continue;
+    seen.add(n.key);
+    neighbors.push(n);
+  }
+  return { node, neighbors };
+}
+
+function interleave<T>(a: T[], b: T[]): T[] {
+  const out: T[] = [];
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if (i < a.length) out.push(a[i]);
+    if (i < b.length && i % 2 === 1) out.push(b[(i - 1) / 2]);
+  }
+  // Las personas que no entraron en la mezcla van al final.
+  const used = new Set(out);
+  return [...out, ...b.filter((x) => !used.has(x))];
+}

@@ -110,6 +110,9 @@ export default async function TitlePage({ params }: Props) {
             </div>
             <div className="flex flex-wrap items-center gap-3 pt-1">
               <LibraryButton inLibrary={inLibrary} item={libItem} />
+              <Link href={`/explore/${t.media_type}/${t.id}`} className="rounded-full bg-white/10 px-5 py-2.5 text-sm font-semibold hover:bg-white/20">
+                ✦ Explorar parecidas
+              </Link>
               {t.trailer_key && (
                 <a href={`https://www.youtube.com/watch?v=${t.trailer_key}`} target="_blank" rel="noreferrer" className="rounded-full bg-white/10 px-5 py-2.5 text-sm font-semibold hover:bg-white/20">
                   ▶ Ver tráiler
