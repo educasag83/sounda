@@ -21,13 +21,12 @@ type SimLink = SimulationLinkDatum<SimNode> & { key: string };
 
 const MAX_NODES = 140;
 const IMG = "https://image.tmdb.org/t/p/w185";
-const COLORS = { tv: "#3ee6b0", movie: "#f5b942", person: "#b49cff" } as const;
-const KIND_LABEL = { tv: "Serie", movie: "Película", person: "Persona" } as const;
-const LEGEND = { tv: "Series", movie: "Películas", person: "Actores" } as const;
+const COLORS = { tv: "#3ee6b0", movie: "#f5b942" } as const;
+const KIND_LABEL = { tv: "Serie", movie: "Película" } as const;
+const LEGEND = { tv: "Series", movie: "Películas" } as const;
 
-function radius(n: GraphNode, isRoot: boolean) {
-  if (isRoot) return 46;
-  return n.kind === "person" ? 25 : 31;
+function radius(isRoot: boolean) {
+  return isRoot ? 46 : 31;
 }
 
 function homeZoom(width: number) {
@@ -97,7 +96,7 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
         if (nodes.length >= MAX_NODES) return;
         // Los nodos nuevos "brotan" desde el que tocaste.
         const a = (i / Math.max(list.length, 1)) * Math.PI * 2 + Math.random() * 0.4;
-        n = { key: data.key, data, r: radius(data, false), phase: Math.random() * Math.PI * 2, x: (parent.x ?? 0) + Math.cos(a) * 12, y: (parent.y ?? 0) + Math.sin(a) * 12 };
+        n = { key: data.key, data, r: radius(false), phase: Math.random() * Math.PI * 2, x: (parent.x ?? 0) + Math.cos(a) * 12, y: (parent.y ?? 0) + Math.sin(a) * 12 };
         nodes.push(n);
         byKey.set(n.key, n);
       }
@@ -118,7 +117,7 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
 
   useEffect(() => {
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const rootNode: SimNode = { key: root.key, data: root, r: radius(root, true), phase: 0, x: 0, y: 0, fx: 0, fy: 0 };
+    const rootNode: SimNode = { key: root.key, data: root, r: radius(true), phase: 0, x: 0, y: 0, fx: 0, fy: 0 };
     nodesRef.current = [rootNode];
     linksRef.current = [];
 
@@ -134,7 +133,7 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
 
     const sim = forceSimulation<SimNode, SimLink>(nodesRef.current)
       .velocityDecay(0.45)
-      .force("charge", forceManyBody<SimNode>().strength((n) => (n.data.kind === "person" ? -220 : -300)).distanceMax(420))
+      .force("charge", forceManyBody<SimNode>().strength(-300).distanceMax(420))
       .force(
         "link",
         forceLink<SimNode, SimLink>([])
@@ -471,7 +470,7 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
           ← {root.label}
         </Link>
         <div className="flex gap-3 rounded-full bg-panel/90 px-3 py-1.5 text-[11px] text-white/70 ring-1 ring-white/10 backdrop-blur">
-          {(["tv", "movie", "person"] as const).map((k) => (
+          {(["tv", "movie"] as const).map((k) => (
             <span key={k} className="flex items-center gap-1.5">
               <span className="h-2.5 w-2.5 rounded-full" style={{ background: COLORS[k] }} />
               {LEGEND[k]}
@@ -550,7 +549,6 @@ function NodeCard({
   onAdded: () => void;
 }) {
   const [pending, start] = useTransition();
-  const isTitle = node.kind !== "person";
   return (
     <div
       className="absolute inset-x-0 bottom-0 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
@@ -558,7 +556,7 @@ function NodeCard({
     >
       <div className="mx-auto flex max-w-md items-center gap-3 rounded-2xl bg-panel/95 p-3 shadow-2xl ring-1 ring-white/10 backdrop-blur">
         <div
-          className={`relative shrink-0 overflow-hidden bg-white/5 ${isTitle ? "aspect-[2/3] w-14 rounded-lg" : "h-14 w-14 rounded-full"}`}
+          className="relative aspect-[2/3] w-14 shrink-0 overflow-hidden rounded-lg bg-white/5"
         >
           {node.image && (
             // eslint-disable-next-line @next/next/no-img-element
@@ -576,9 +574,7 @@ function NodeCard({
               ? "Buscando conexiones…"
               : failed
                 ? "No pude cargar sus conexiones."
-                : isTitle
-                  ? `${node.year ? node.year + " · " : ""}Alrededor: parecidas y su reparto`
-                  : "Alrededor: donde actuó"}
+                : `${node.year ? node.year + " · " : ""}Alrededor: sus parecidas`}
           </p>
           {failed && (
             <button onClick={retry} className="text-xs font-semibold text-accent">
@@ -586,7 +582,6 @@ function NodeCard({
             </button>
           )}
         </div>
-        {isTitle && (
           <div className="flex shrink-0 flex-col gap-1.5">
             <Link href={`/title/${node.kind}/${node.id}`} className="rounded-full bg-white/10 px-3 py-1.5 text-center text-xs font-semibold hover:bg-white/20">
               Ver ficha
@@ -596,7 +591,7 @@ function NodeCard({
               onClick={() =>
                 start(async () => {
                   await addToLibrary({
-                    media_type: node.kind as "movie" | "tv",
+                    media_type: node.kind,
                     tmdb_id: node.id,
                     title: node.label,
                     poster_path: node.image,
@@ -613,7 +608,6 @@ function NodeCard({
               {pending ? "Guardando…" : inLibrary ? "✓ Guardada" : "+ Biblioteca"}
             </button>
           </div>
-        )}
       </div>
     </div>
   );
