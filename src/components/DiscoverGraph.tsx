@@ -18,21 +18,45 @@ import type { GraphNode } from "@/lib/tmdb";
 
 type SimNode = SimulationNodeDatum & { key: string; data: GraphNode; r: number; phase: number };
 type SimLink = SimulationLinkDatum<SimNode> & { key: string; via?: string };
+type Filter = "all" | "similar" | "people";
 
-const MAX_NODES = 140;
 const IMG = "https://image.tmdb.org/t/p/w185";
 const COLORS = { tv: "#3ee6b0", movie: "#f5b942" } as const;
 const KIND_LABEL = { tv: "Serie", movie: "Película" } as const;
-const LEGEND = { tv: "Series", movie: "Películas" } as const;
 // Conexiones por protagonistas o creador.
 const PEOPLE_COLOR = "#b49cff";
+const FILTERS: { value: Filter; label: string }[] = [
+  { value: "all", label: "Todo" },
+  { value: "similar", label: "Parecidas" },
+  { value: "people", label: "Elenco y creador" },
+];
 
-function radius(isRoot: boolean) {
-  return isRoot ? 46 : 31;
-}
+// Tamaños: el foco grande, sus conexiones medianas y el camino recorrido chiquito.
+const R_FOCUS = 42;
+const R_NEIGHBOR = 29;
+const R_TRAIL = 20;
 
 function homeZoom(width: number) {
-  return width < 640 ? 0.78 : 1;
+  return width < 640 ? 0.85 : 1;
+}
+
+/**
+ * Pocas conexiones a la vez para que el mapa respire.
+ * En el título de inicio: 5 parecidas + 3 por elenco o creador. Después: 3 + 2.
+ */
+function pick(list: GraphNode[], filter: Filter, isRoot: boolean, exclude: Set<string>): GraphNode[] {
+  const fresh = list.filter((n) => !exclude.has(n.key));
+  const similar = fresh.filter((n) => !n.via);
+  // Una por persona primero, así no se repite siempre el mismo actor.
+  const byVia = new Map<string, GraphNode[]>();
+  for (const n of fresh.filter((n) => n.via)) byVia.set(n.via!, [...(byVia.get(n.via!) ?? []), n]);
+  const people: GraphNode[] = [];
+  for (let round = 0; people.length < fresh.length && round < 4; round++) {
+    for (const group of byVia.values()) if (group[round]) people.push(group[round]);
+  }
+  if (filter === "similar") return similar.slice(0, 6);
+  if (filter === "people") return people.slice(0, 6);
+  return isRoot ? [...similar.slice(0, 5), ...people.slice(0, 3)] : [...similar.slice(0, 3), ...people.slice(0, 2)];
 }
 
 type Camera = { x: number; y: number; k: number };
@@ -42,6 +66,8 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
   const worldRef = useRef<HTMLDivElement>(null);
   const nodesRef = useRef<SimNode[]>([]);
   const linksRef = useRef<SimLink[]>([]);
+  const pool = useRef(new Map<string, SimNode>());
+  const cache = useRef(new Map<string, GraphNode[]>([[root.key, neighbors]]));
   const simRef = useRef<Simulation<SimNode, SimLink> | null>(null);
   const nodeEls = useRef(new Map<string, HTMLElement>());
   const linkEls = useRef(new Map<string, SVGLineElement>());
@@ -50,13 +76,16 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
   const size = useRef({ w: 0, h: 0 });
 
   const [, setVersion] = useState(0);
+  const [cacheVersion, setCacheVersion] = useState(0);
   const [top, setTop] = useState(57);
-  const [selected, setSelected] = useState<string>(root.key);
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set([root.key]));
-  const [loading, setLoading] = useState<Set<string>>(() => new Set());
+  // Camino recorrido desde el título inicial hasta el foco actual.
+  const [path, setPath] = useState<string[]>([root.key]);
+  const [filter, setFilter] = useState<Filter>("all");
+  const [loading, setLoading] = useState<string | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [library, setLibrary] = useState(() => new Set(libraryKeys));
   const [hint, setHint] = useState(true);
+  const focus = path[path.length - 1];
 
   /* ---------- Dibujo imperativo (no pasa por React en cada cuadro) ---------- */
 
@@ -83,75 +112,42 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
     }
   }, []);
 
-  /* ---------- Simulación ---------- */
-
-  const addNeighbors = useCallback((parentKey: string, list: GraphNode[]) => {
-    const nodes = nodesRef.current;
-    const links = linksRef.current;
-    const byKey = new Map(nodes.map((n) => [n.key, n]));
-    const parent = byKey.get(parentKey);
-    if (!parent) return;
-    const linkKeys = new Set(links.map((l) => l.key));
-    list.forEach((data, i) => {
-      let n = byKey.get(data.key);
-      if (!n) {
-        if (nodes.length >= MAX_NODES) return;
-        // Los nodos nuevos "brotan" desde el que tocaste.
-        const a = (i / Math.max(list.length, 1)) * Math.PI * 2 + Math.random() * 0.4;
-        n = { key: data.key, data, r: radius(false), phase: Math.random() * Math.PI * 2, x: (parent.x ?? 0) + Math.cos(a) * 12, y: (parent.y ?? 0) + Math.sin(a) * 12 };
-        nodes.push(n);
-        byKey.set(n.key, n);
-      }
-      const key = [parentKey, data.key].sort().join("|");
-      if (!linkKeys.has(key)) {
-        linkKeys.add(key);
-        links.push({ key, source: parent, target: n, via: data.via });
-      }
-    });
-    const sim = simRef.current;
-    if (sim) {
-      sim.nodes(nodes);
-      (sim.force("link") as ReturnType<typeof forceLink<SimNode, SimLink>>).links(links);
-      sim.alpha(0.9).restart();
-    }
-    setVersion((v) => v + 1);
+  const focusOn = useCallback((n: SimNode) => {
+    const k = cam.current.k;
+    camTarget.current = { x: -(n.x ?? 0) * k, y: -(n.y ?? 0) * k, k };
   }, []);
+
+  /* ---------- Simulación ---------- */
 
   useEffect(() => {
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const rootNode: SimNode = { key: root.key, data: root, r: radius(true), phase: 0, x: 0, y: 0, fx: 0, fy: 0 };
-    nodesRef.current = [rootNode];
-    linksRef.current = [];
-
     const drift = () => {
       if (reduceMotion) return;
       const t = performance.now() / 1000;
       for (const n of nodesRef.current) {
         if (n.fx != null) continue;
-        n.vx = (n.vx ?? 0) + Math.cos(t * 0.6 + n.phase) * 0.045;
-        n.vy = (n.vy ?? 0) + Math.sin(t * 0.5 + n.phase * 1.3) * 0.045;
+        n.vx = (n.vx ?? 0) + Math.cos(t * 0.6 + n.phase) * 0.04;
+        n.vy = (n.vy ?? 0) + Math.sin(t * 0.5 + n.phase * 1.3) * 0.04;
       }
     };
-
-    const sim = forceSimulation<SimNode, SimLink>(nodesRef.current)
+    const sim = forceSimulation<SimNode, SimLink>([])
       .velocityDecay(0.45)
-      .force("charge", forceManyBody<SimNode>().strength(-300).distanceMax(420))
+      .force("charge", forceManyBody<SimNode>().strength(-380).distanceMax(500))
       .force(
         "link",
         forceLink<SimNode, SimLink>([])
           .id((n) => n.key)
-          .distance((l) => (l.source as SimNode).r + (l.target as SimNode).r + 46)
-          .strength(0.55),
+          .distance((l) => (l.source as SimNode).r + (l.target as SimNode).r + 70)
+          .strength(0.6),
       )
-      .force("collide", forceCollide<SimNode>((n) => n.r + 16).strength(0.9))
-      .force("x", forceX<SimNode>(0).strength(0.025))
-      .force("y", forceY<SimNode>(0).strength(0.025))
+      // Radio extra para que también entren los títulos debajo de cada círculo.
+      .force("collide", forceCollide<SimNode>((n) => n.r + 30).strength(1).iterations(2))
+      .force("x", forceX<SimNode>(0).strength(0.015))
+      .force("y", forceY<SimNode>(0).strength(0.015))
       .force("drift", drift)
-      .alphaTarget(reduceMotion ? 0 : 0.012)
+      .alphaTarget(reduceMotion ? 0 : 0.01)
       .on("tick", draw);
     simRef.current = sim;
-    addNeighbors(root.key, neighbors);
-
     const onVisibility = () => (document.hidden ? sim.stop() : sim.restart());
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
@@ -159,7 +155,72 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
       sim.stop();
       simRef.current = null;
     };
-  }, [root, neighbors, addNeighbors, draw]);
+  }, [draw]);
+
+  // Arma lo que se ve: el camino recorrido + las conexiones del foco. Lo demás se oculta.
+  useEffect(() => {
+    const sim = simRef.current;
+    if (!sim) return;
+    const get = (data: GraphNode) => {
+      let n = pool.current.get(data.key);
+      if (!n) {
+        n = { key: data.key, data, r: R_NEIGHBOR, phase: Math.random() * Math.PI * 2, x: 0, y: 0 };
+        pool.current.set(data.key, n);
+      }
+      return n;
+    };
+    const prevVisible = new Set(nodesRef.current.map((n) => n.key));
+    const onPath = new Set(path);
+    const nodes: SimNode[] = [];
+    const links: SimLink[] = [];
+
+    // El camino.
+    let parentList: GraphNode[] = [];
+    path.forEach((key, i) => {
+      const data = key === root.key ? root : parentList.find((d) => d.key === key) ?? pool.current.get(key)?.data;
+      if (!data) return;
+      const n = get(data);
+      n.r = key === focus ? R_FOCUS : R_TRAIL;
+      nodes.push(n);
+      if (i > 0) {
+        const prev = pool.current.get(path[i - 1])!;
+        links.push({ key: `${prev.key}|${key}`, source: prev, target: n, via: data.via });
+      }
+      parentList = cache.current.get(key) ?? [];
+    });
+
+    // Las conexiones del foco.
+    const focusNode = pool.current.get(focus)!;
+    const around = pick(cache.current.get(focus) ?? [], filter, focus === root.key, onPath);
+    around.forEach((data, i) => {
+      const n = get(data);
+      n.r = R_NEIGHBOR;
+      if (!prevVisible.has(n.key)) {
+        // Brotan desde el foco, repartidos en círculo.
+        const a = (i / Math.max(around.length, 1)) * Math.PI * 2 + Math.random() * 0.3;
+        n.x = (focusNode.x ?? 0) + Math.cos(a) * 20;
+        n.y = (focusNode.y ?? 0) + Math.sin(a) * 20;
+        n.vx = 0;
+        n.vy = 0;
+      }
+      nodes.push(n);
+      links.push({ key: `${focus}|${n.key}`, source: focusNode, target: n, via: data.via });
+    });
+
+    // Solo el foco queda fijo; el resto flota.
+    for (const n of nodes) {
+      n.fx = n.key === focus ? (n.x ?? 0) : null;
+      n.fy = n.key === focus ? (n.y ?? 0) : null;
+    }
+
+    nodesRef.current = nodes;
+    linksRef.current = links;
+    sim.nodes(nodes);
+    (sim.force("link") as ReturnType<typeof forceLink<SimNode, SimLink>>).links(links);
+    sim.alpha(0.8).restart();
+    focusOn(focusNode);
+    setVersion((v) => v + 1);
+  }, [path, filter, cacheVersion, focus, root, focusOn]);
 
   /* ---------- Tamaño del lienzo (debajo del encabezado) ---------- */
 
@@ -172,7 +233,6 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
       if (box) {
         const first = size.current.w === 0;
         size.current = { w: box.clientWidth, h: box.clientHeight };
-        // En el celular arrancamos un poco más lejos para que entre todo.
         if (first) cam.current.k = homeZoom(box.clientWidth);
       }
       applyCamera();
@@ -192,9 +252,9 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
       const t = camTarget.current;
       if (t) {
         const c = cam.current;
-        c.x += (t.x - c.x) * 0.12;
-        c.y += (t.y - c.y) * 0.12;
-        c.k += (t.k - c.k) * 0.12;
+        c.x += (t.x - c.x) * 0.1;
+        c.y += (t.y - c.y) * 0.1;
+        c.k += (t.k - c.k) * 0.1;
         if (Math.abs(t.x - c.x) < 0.5 && Math.abs(t.y - c.y) < 0.5 && Math.abs(t.k - c.k) < 0.002) {
           cam.current = { ...t };
           camTarget.current = null;
@@ -207,46 +267,38 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
     return () => cancelAnimationFrame(raf);
   }, [applyCamera]);
 
-  const focusOn = useCallback((n: SimNode) => {
-    const k = cam.current.k;
-    // Un poco más arriba del centro: abajo va la tarjeta del nodo.
-    camTarget.current = { x: -(n.x ?? 0) * k, y: -(n.y ?? 0) * k - size.current.h * 0.12, k };
+  /* ---------- Cargar conexiones de un título ---------- */
+
+  const load = useCallback(async (key: string) => {
+    if (cache.current.has(key)) return;
+    setFailed(null);
+    setLoading(key);
+    try {
+      const res = await fetch(`/api/explorar?n=${encodeURIComponent(key)}`);
+      if (!res.ok) throw new Error(String(res.status));
+      const data: { neighbors: GraphNode[] } = await res.json();
+      cache.current.set(key, data.neighbors);
+      setCacheVersion((v) => v + 1);
+    } catch {
+      setFailed(key);
+    } finally {
+      setLoading((k) => (k === key ? null : k));
+    }
   }, []);
-
-  /* ---------- Expandir un nodo ---------- */
-
-  const expand = useCallback(
-    async (n: SimNode) => {
-      if (expanded.has(n.key) || loading.has(n.key)) return;
-      setFailed(null);
-      setLoading((s) => new Set(s).add(n.key));
-      try {
-        const res = await fetch(`/api/explorar?n=${encodeURIComponent(n.key)}`);
-        if (!res.ok) throw new Error(String(res.status));
-        const data: { neighbors: GraphNode[] } = await res.json();
-        addNeighbors(n.key, data.neighbors);
-        setExpanded((s) => new Set(s).add(n.key));
-      } catch {
-        setFailed(n.key);
-      } finally {
-        setLoading((s) => {
-          const next = new Set(s);
-          next.delete(n.key);
-          return next;
-        });
-      }
-    },
-    [expanded, loading, addNeighbors],
-  );
 
   const tap = useCallback(
     (n: SimNode) => {
       setHint(false);
-      setSelected(n.key);
-      focusOn(n);
-      expand(n);
+      const idx = path.indexOf(n.key);
+      if (idx === path.length - 1) {
+        focusOn(n);
+        return;
+      }
+      // Tocar el camino vuelve atrás; tocar una conexión avanza.
+      setPath(idx >= 0 ? path.slice(0, idx + 1) : [...path, n.key]);
+      load(n.key);
     },
-    [expand, focusOn],
+    [path, focusOn, load],
   );
 
   /* ---------- Gestos: arrastrar, mover el mapa, pellizcar ---------- */
@@ -278,6 +330,12 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
     applyCamera();
   };
 
+  const release = (n: SimNode) => {
+    if (n.key === focus) return;
+    n.fx = null;
+    n.fy = null;
+  };
+
   const onPointerDown = (e: React.PointerEvent) => {
     const g = gesture.current;
     boxRef.current?.setPointerCapture(e.pointerId);
@@ -286,10 +344,7 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
     if (g.pointers.size === 2) {
       const [a, b] = [...g.pointers.values()];
       g.pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y), k: cam.current.k };
-      if (g.node) {
-        g.node.fx = g.node.key === root.key ? g.node.x : null;
-        g.node.fy = g.node.key === root.key ? g.node.y : null;
-      }
+      if (g.node) release(g.node);
       g.node = null;
       g.moved = true;
       return;
@@ -308,9 +363,7 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
     if (g.pinch && g.pointers.size >= 2) {
       const [a, b] = [...g.pointers.values()];
       const dist = Math.hypot(a.x - b.x, a.y - b.y);
-      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-      zoomAt(mid.x, mid.y, g.pinch.k * (dist / g.pinch.dist));
-      // Además del zoom, mover con el punto medio.
+      zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, g.pinch.k * (dist / g.pinch.dist));
       cam.current.x += (e.clientX - prev.x) / 2;
       cam.current.y += (e.clientY - prev.y) / 2;
       applyCamera();
@@ -337,12 +390,9 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
     if (g.pointers.size > 0) return;
     if (g.node) {
       if (!g.moved) tap(g.node);
-      else if (g.node.key !== root.key) {
-        g.node.fx = null;
-        g.node.fy = null;
-      }
+      else release(g.node);
       const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      simRef.current?.alphaTarget(reduce ? 0 : 0.012);
+      simRef.current?.alphaTarget(reduce ? 0 : 0.01);
     }
     g.node = null;
     g.start = null;
@@ -364,20 +414,14 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
 
   const nodes = nodesRef.current;
   const links = linksRef.current;
-  const sel = nodes.find((n) => n.key === selected) ?? nodes[0];
-  const neighborKeys = new Set<string>();
-  for (const l of links) {
-    const s = (l.source as SimNode).key;
-    const t = (l.target as SimNode).key;
-    if (s === selected) neighborKeys.add(t);
-    if (t === selected) neighborKeys.add(s);
-  }
+  const onPath = new Set(path);
+  const sel = pool.current.get(focus);
 
   return (
     <div
       ref={boxRef}
       className="fixed inset-x-0 bottom-0 z-20 touch-none select-none overflow-hidden bg-ink"
-      style={{ top, backgroundImage: "radial-gradient(circle at 50% 40%, rgba(62,230,176,0.08), transparent 60%)" }}
+      style={{ top, backgroundImage: "radial-gradient(circle at 50% 40%, rgba(62,230,176,0.07), transparent 60%)" }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -386,9 +430,7 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
       <div ref={worldRef} className="absolute left-0 top-0 origin-top-left will-change-transform">
         <svg className="absolute overflow-visible" width="1" height="1" aria-hidden>
           {links.map((l) => {
-            const s = (l.source as SimNode).key;
-            const t = (l.target as SimNode).key;
-            const on = s === selected || t === selected;
+            const trail = onPath.has((l.target as SimNode).key);
             return (
               <line
                 key={l.key}
@@ -396,17 +438,17 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
                   if (el) linkEls.current.set(l.key, el);
                   else linkEls.current.delete(l.key);
                 }}
-                stroke={l.via ? (on ? PEOPLE_COLOR : "rgba(180,156,255,0.35)") : on ? "#3ee6b0" : "rgba(255,255,255,0.14)"}
-                strokeWidth={on ? 2 : 1.2}
+                stroke={l.via ? PEOPLE_COLOR : trail ? "rgba(255,255,255,0.35)" : "#3ee6b0"}
+                strokeOpacity={trail ? 0.5 : 0.6}
+                strokeWidth={trail ? 1.5 : 1.5}
                 strokeDasharray={l.via ? "5 4" : undefined}
               />
             );
           })}
         </svg>
         {nodes.map((n) => {
-          const isRoot = n.key === root.key;
-          const isSel = n.key === selected;
-          const dim = !isSel && !neighborKeys.has(n.key) && !isRoot;
+          const isFocus = n.key === focus;
+          const isTrail = onPath.has(n.key) && !isFocus;
           const color = COLORS[n.data.kind];
           const d = n.r * 2;
           return (
@@ -420,18 +462,18 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
                 } else nodeEls.current.delete(n.key);
               }}
               className="absolute left-0 top-0 cursor-pointer"
-              style={{ zIndex: isSel ? 3 : isRoot ? 2 : 1 }}
+              style={{ zIndex: isFocus ? 3 : isTrail ? 1 : 2 }}
             >
               <div
                 className="absolute flex flex-col items-center transition-opacity duration-300"
-                style={{ left: -n.r, top: -n.r, width: d, opacity: dim ? 0.55 : 1 }}
+                style={{ left: -n.r, top: -n.r, width: d, opacity: isTrail ? 0.5 : 1 }}
               >
                 <div
-                  className="relative overflow-hidden rounded-full bg-panel animate-[pop_.45s_ease-out]"
+                  className="relative overflow-hidden rounded-full bg-panel transition-[width,height] duration-300 animate-[pop_.45s_ease-out]"
                   style={{
                     width: d,
                     height: d,
-                    boxShadow: `0 0 0 ${isSel ? 3 : 2}px ${isSel ? "#fff" : color}${isSel ? `, 0 0 22px 4px ${color}88` : ""}`,
+                    boxShadow: isFocus ? `0 0 0 3px #fff, 0 0 24px 4px ${color}77` : `0 0 0 2px ${color}`,
                   }}
                 >
                   {n.data.image ? (
@@ -440,27 +482,22 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
                   ) : (
                     <span className="grid h-full w-full place-items-center px-1 text-center text-[9px] leading-tight text-white/70">{n.data.label}</span>
                   )}
-                  {loading.has(n.key) && <span className="absolute inset-0 animate-pulse rounded-full bg-ink/60 ring-2 ring-inset ring-white/60" />}
+                  {loading === n.key && <span className="absolute inset-0 animate-pulse rounded-full bg-ink/60 ring-2 ring-inset ring-white/60" />}
                 </div>
-                {!expanded.has(n.key) && !loading.has(n.key) && (
-                  <span
-                    className="absolute grid h-5 w-5 place-items-center rounded-full text-[13px] font-bold leading-none text-ink shadow"
-                    style={{ right: -2, top: d - 18, background: color }}
-                    aria-hidden
-                  >
-                    +
-                  </span>
-                )}
-                <span
-                  className="pointer-events-none mt-1 line-clamp-2 w-[110px] text-center text-[11px] font-medium leading-tight text-white/85 [text-shadow:0_1px_3px_#000]"
-                  style={{ fontSize: isRoot ? 13 : undefined }}
-                >
-                  {n.data.label}
-                </span>
-                {n.data.via && (
-                  <span className="pointer-events-none line-clamp-1 w-[110px] text-center text-[10px] leading-tight [text-shadow:0_1px_3px_#000]" style={{ color: PEOPLE_COLOR }}>
-                    {n.data.via}
-                  </span>
+                {!isTrail && (
+                  <>
+                    <span
+                      className="pointer-events-none mt-1.5 line-clamp-2 w-[104px] text-center text-[11px] font-medium leading-tight text-white/85 [text-shadow:0_1px_3px_#000]"
+                      style={{ fontSize: isFocus ? 13 : undefined }}
+                    >
+                      {n.data.label}
+                    </span>
+                    {n.data.via && !isFocus && (
+                      <span className="pointer-events-none line-clamp-1 w-[104px] text-center text-[10px] leading-tight [text-shadow:0_1px_3px_#000]" style={{ color: PEOPLE_COLOR }}>
+                        {n.data.via}
+                      </span>
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -468,32 +505,33 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
         })}
       </div>
 
-      {/* Leyenda y ayuda */}
-      <div className="pointer-events-none absolute inset-x-0 top-0 flex flex-wrap items-start justify-between gap-2 p-3">
+      {/* Arriba: volver y filtro */}
+      <div className="pointer-events-none absolute inset-x-0 top-0 flex flex-col items-start gap-2 p-3">
         <Link
           href={`/title/${root.kind}/${root.id}`}
-          className="pointer-events-auto rounded-full bg-panel/90 px-3 py-1.5 text-sm text-white/80 ring-1 ring-white/10 backdrop-blur hover:text-white"
+          className="pointer-events-auto max-w-[70%] truncate rounded-full bg-panel/90 px-3 py-1.5 text-sm text-white/80 ring-1 ring-white/10 backdrop-blur hover:text-white"
           onPointerDown={(e) => e.stopPropagation()}
         >
           ← {root.label}
         </Link>
-        <div className="flex gap-3 rounded-full bg-panel/90 px-3 py-1.5 text-[11px] text-white/70 ring-1 ring-white/10 backdrop-blur">
-          {(["tv", "movie"] as const).map((k) => (
-            <span key={k} className="flex items-center gap-1.5">
-              <span className="h-2.5 w-2.5 rounded-full" style={{ background: COLORS[k] }} />
-              {LEGEND[k]}
-            </span>
+        <div
+          className="pointer-events-auto flex gap-1 rounded-full bg-panel/90 p-1 text-xs ring-1 ring-white/10 backdrop-blur"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          {FILTERS.map((f) => (
+            <button
+              key={f.value}
+              onClick={() => setFilter(f.value)}
+              className={`rounded-full px-3 py-1 transition ${filter === f.value ? "bg-white/15 text-white" : "text-white/60 hover:text-white"}`}
+            >
+              {f.value === "people" && <span className="mr-1 inline-block h-0 w-3 border-t-2 border-dashed align-middle" style={{ borderColor: PEOPLE_COLOR }} />}
+              {f.label}
+            </button>
           ))}
-          <span className="flex items-center gap-1.5">
-            <svg width="14" height="4" aria-hidden>
-              <line x1="0" y1="2" x2="14" y2="2" stroke={PEOPLE_COLOR} strokeWidth="2" strokeDasharray="4 3" />
-            </svg>
-            Elenco o creador
-          </span>
         </div>
       </div>
 
-      <div className="pointer-events-none absolute right-3 top-28 flex flex-col gap-2">
+      <div className="pointer-events-none absolute right-3 top-3 flex flex-col gap-2">
         {[
           { label: "Acercar", text: "+", f: 1.3 },
           { label: "Alejar", text: "−", f: 1 / 1.3 },
@@ -512,12 +550,12 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
           </button>
         ))}
         <button
-          aria-label="Volver al centro"
+          aria-label="Volver al inicio"
           className="pointer-events-auto grid h-9 w-9 place-items-center rounded-full bg-panel/90 text-white/80 ring-1 ring-white/10 hover:text-white"
           onPointerDown={(e) => e.stopPropagation()}
           onClick={() => {
-            camTarget.current = { x: 0, y: 0, k: homeZoom(size.current.w) };
-            setSelected(root.key);
+            setPath([root.key]);
+            cam.current.k = homeZoom(size.current.w);
           }}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
@@ -527,18 +565,16 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
         </button>
       </div>
 
-      {hint && (
-        <p className="pointer-events-none absolute inset-x-0 top-28 mx-auto w-fit max-w-[70%] rounded-full bg-ink/70 px-3 py-1.5 text-center text-xs text-white/70">
-          Toca un círculo para ver sus conexiones
-        </p>
-      )}
 
       {sel && (
         <NodeCard
           node={sel.data}
-          loading={loading.has(sel.key)}
+          hint={hint}
+          canGoBack={path.length > 1}
+          back={() => setPath(path.slice(0, -1))}
+          loading={loading === sel.key}
           failed={failed === sel.key}
-          retry={() => expand(sel)}
+          retry={() => load(sel.key)}
           inLibrary={library.has(sel.key)}
           onAdded={() => setLibrary((s) => new Set(s).add(sel.key))}
         />
@@ -549,6 +585,9 @@ export default function DiscoverGraph({ root, neighbors, libraryKeys }: { root: 
 
 function NodeCard({
   node,
+  hint,
+  canGoBack,
+  back,
   loading,
   failed,
   retry,
@@ -556,6 +595,9 @@ function NodeCard({
   onAdded,
 }: {
   node: GraphNode;
+  hint: boolean;
+  canGoBack: boolean;
+  back: () => void;
   loading: boolean;
   failed: boolean;
   retry: () => void;
@@ -564,14 +606,14 @@ function NodeCard({
 }) {
   const [pending, start] = useTransition();
   return (
-    <div
-      className="absolute inset-x-0 bottom-0 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
-      onPointerDown={(e) => e.stopPropagation()}
-    >
+    <div className="absolute inset-x-0 bottom-0 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]" onPointerDown={(e) => e.stopPropagation()}>
       <div className="mx-auto flex max-w-md items-center gap-3 rounded-2xl bg-panel/95 p-3 shadow-2xl ring-1 ring-white/10 backdrop-blur">
-        <div
-          className="relative aspect-[2/3] w-14 shrink-0 overflow-hidden rounded-lg bg-white/5"
-        >
+        {canGoBack && (
+          <button onClick={back} aria-label="Volver al anterior" className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-white/10 text-white/80 hover:bg-white/20">
+            ‹
+          </button>
+        )}
+        <div className="relative aspect-[2/3] w-12 shrink-0 overflow-hidden rounded-lg bg-white/5">
           {node.image && (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={IMG + node.image} alt="" className="h-full w-full object-cover" />
@@ -588,7 +630,9 @@ function NodeCard({
               ? "Buscando conexiones…"
               : failed
                 ? "No pude cargar sus conexiones."
-                : [node.year, node.via].filter(Boolean).join(" · ") || "Toca otro círculo para seguir"}
+                : hint
+                  ? "Toca un círculo para seguir explorando"
+                  : [node.year, node.via].filter(Boolean).join(" · ")}
           </p>
           {failed && (
             <button onClick={retry} className="text-xs font-semibold text-accent">
@@ -596,32 +640,32 @@ function NodeCard({
             </button>
           )}
         </div>
-          <div className="flex shrink-0 flex-col gap-1.5">
-            <Link href={`/title/${node.kind}/${node.id}`} className="rounded-full bg-white/10 px-3 py-1.5 text-center text-xs font-semibold hover:bg-white/20">
-              Ver ficha
-            </Link>
-            <button
-              disabled={pending || inLibrary}
-              onClick={() =>
-                start(async () => {
-                  await addToLibrary({
-                    media_type: node.kind,
-                    tmdb_id: node.id,
-                    title: node.label,
-                    poster_path: node.image,
-                    backdrop_path: node.backdrop,
-                    year: node.year,
-                  });
-                  onAdded();
-                })
-              }
-              className={`rounded-full px-3 py-1.5 text-xs font-semibold transition disabled:opacity-80 ${
-                inLibrary ? "bg-white/10 text-white/70" : "bg-accent text-ink hover:brightness-110"
-              }`}
-            >
-              {pending ? "Guardando…" : inLibrary ? "✓ Guardada" : "+ Biblioteca"}
-            </button>
-          </div>
+        <div className="flex shrink-0 flex-col gap-1.5">
+          <Link href={`/title/${node.kind}/${node.id}`} className="rounded-full bg-white/10 px-3 py-1.5 text-center text-xs font-semibold hover:bg-white/20">
+            Ver ficha
+          </Link>
+          <button
+            disabled={pending || inLibrary}
+            onClick={() =>
+              start(async () => {
+                await addToLibrary({
+                  media_type: node.kind,
+                  tmdb_id: node.id,
+                  title: node.label,
+                  poster_path: node.image,
+                  backdrop_path: node.backdrop,
+                  year: node.year,
+                });
+                onAdded();
+              })
+            }
+            className={`rounded-full px-3 py-1.5 text-xs font-semibold transition disabled:opacity-80 ${
+              inLibrary ? "bg-white/10 text-white/70" : "bg-accent text-ink hover:brightness-110"
+            }`}
+          >
+            {pending ? "Guardando…" : inLibrary ? "✓ Guardada" : "+ Biblioteca"}
+          </button>
+        </div>
       </div>
     </div>
   );
