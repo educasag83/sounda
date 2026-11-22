@@ -31,6 +31,10 @@ export type TitleDetails = SearchResult & {
   number_of_episodes: number | null;
   next_episode: { season_number: number; episode_number: number; name: string; air_date: string } | null;
   last_episode: { season_number: number; episode_number: number } | null;
+  /** Temporada nueva con fecha de estreno futura (si TMDB la tiene). */
+  upcoming_season: Season | null;
+  /** true si la serie sigue saliendo (en emisión o con capítulos por venir). */
+  airing: boolean;
   trailer_key: string | null;
   providers: Provider[];
   imdb_id: string | null;
@@ -60,6 +64,22 @@ async function tmdb<T>(path: string, params: Record<string, string> = {}, revali
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Raw = Record<string, any>;
+
+const FALLBACK_LANGUAGE = "en-US";
+
+/** TMDB en español suele traer "Episodio 3" o nada cuando nadie tradujo el nombre. */
+export function isGenericEpisodeName(name: string | null | undefined, episode?: number) {
+  const n = (name ?? "").trim();
+  if (!n) return true;
+  if (/^(episodio|cap[ií]tulo|episode|ep\.?)\s*\d+$/i.test(n)) return true;
+  return episode !== undefined && n === String(episode);
+}
+
+function pickName(local: string | null | undefined, fallback: string | null | undefined, episode: number) {
+  if (!isGenericEpisodeName(local, episode)) return local!.trim();
+  if (!isGenericEpisodeName(fallback, episode)) return fallback!.trim();
+  return `Capítulo ${episode}`;
+}
 
 function normalize(r: Raw, fallbackType?: MediaType): SearchResult {
   const media_type: MediaType = r.media_type === "tv" || (!r.media_type && fallbackType === "tv") ? "tv" : "movie";
@@ -96,6 +116,30 @@ export async function getTitle(type: MediaType, id: number): Promise<TitleDetail
   const prov = r["watch/providers"]?.results?.[region];
   const videos: Raw[] = r.videos?.results ?? [];
   const trailer = videos.find((v) => v.site === "YouTube" && v.type === "Trailer") ?? videos.find((v) => v.site === "YouTube");
+  const seasons: Season[] = (r.seasons ?? []).filter((s: Raw) => s.season_number > 0);
+  const today = new Date().toISOString().slice(0, 10);
+  const nextEp: Raw | null = r.next_episode_to_air ?? null;
+  let next_episode: TitleDetails["next_episode"] = null;
+  if (nextEp) {
+    let name = nextEp.name;
+    if (isGenericEpisodeName(name, nextEp.episode_number)) {
+      const en = await getEpisodeRaw(id, nextEp.season_number, nextEp.episode_number, FALLBACK_LANGUAGE);
+      name = en?.name;
+    }
+    next_episode = {
+      season_number: nextEp.season_number,
+      episode_number: nextEp.episode_number,
+      name: pickName(name, null, nextEp.episode_number),
+      air_date: nextEp.air_date,
+    };
+  }
+  const airing = type === "tv" && (r.status === "Returning Series" || r.in_production === true || Boolean(next_episode));
+  const lastSeason: number = r.last_episode_to_air?.season_number ?? 0;
+  const upcoming_season = airing
+    ? (seasons.find((s) => s.air_date && s.air_date > today) ??
+      seasons.find((s) => s.season_number > lastSeason && !s.air_date && lastSeason > 0) ??
+      null)
+    : null;
   return {
     ...base,
     media_type: type,
@@ -109,11 +153,13 @@ export async function getTitle(type: MediaType, id: number): Promise<TitleDetail
       character: c.character,
       profile_path: c.profile_path,
     })),
-    seasons: (r.seasons ?? []).filter((s: Raw) => s.season_number > 0),
+    seasons,
     number_of_seasons: r.number_of_seasons ?? null,
     number_of_episodes: r.number_of_episodes ?? null,
-    next_episode: r.next_episode_to_air ?? null,
+    next_episode,
     last_episode: r.last_episode_to_air ?? null,
+    upcoming_season,
+    airing,
     trailer_key: trailer?.key ?? null,
     providers: prov?.flatrate ?? [],
     imdb_id: r.imdb_id ?? r.external_ids?.imdb_id ?? null,
@@ -132,13 +178,25 @@ export async function findTitle(type: MediaType, title: string, year: number | n
 
 export type Episode = { season_number: number; episode_number: number; name: string; still_path: string | null; air_date: string | null };
 
-export async function getEpisode(tvId: number, season: number, episode: number): Promise<Episode | null> {
+async function getEpisodeRaw(tvId: number, season: number, episode: number, language?: string): Promise<Raw | null> {
   try {
-    const r = await tmdb<Raw>(`/tv/${tvId}/season/${season}/episode/${episode}`);
-    return { season_number: r.season_number, episode_number: r.episode_number, name: r.name, still_path: r.still_path, air_date: r.air_date };
+    return await tmdb<Raw>(`/tv/${tvId}/season/${season}/episode/${episode}`, language ? { language } : {});
   } catch {
     return null;
   }
+}
+
+export async function getEpisode(tvId: number, season: number, episode: number): Promise<Episode | null> {
+  const r = await getEpisodeRaw(tvId, season, episode);
+  if (!r) return null;
+  const en = isGenericEpisodeName(r.name, r.episode_number) ? await getEpisodeRaw(tvId, season, episode, FALLBACK_LANGUAGE) : null;
+  return {
+    season_number: r.season_number,
+    episode_number: r.episode_number,
+    name: pickName(r.name, en?.name, r.episode_number),
+    still_path: r.still_path,
+    air_date: r.air_date,
+  };
 }
 
 export type SeasonEpisode = Episode & { overview: string; runtime: number | null };
@@ -146,14 +204,21 @@ export type SeasonEpisode = Episode & { overview: string; runtime: number | null
 export async function getSeason(tvId: number, season: number): Promise<{ name: string; overview: string; episodes: SeasonEpisode[] } | null> {
   try {
     const r = await tmdb<Raw>(`/tv/${tvId}/season/${season}`);
+    const episodes: Raw[] = r.episodes ?? [];
+    // Si faltan nombres o sinopsis en español, los completamos con los de inglés.
+    const needsFallback = episodes.some((e) => isGenericEpisodeName(e.name, e.episode_number) || !e.overview);
+    const en = needsFallback
+      ? await tmdb<Raw>(`/tv/${tvId}/season/${season}`, { language: FALLBACK_LANGUAGE }).catch(() => null)
+      : null;
+    const enByNumber = new Map<number, Raw>((en?.episodes ?? []).map((e: Raw) => [e.episode_number, e]));
     return {
       name: r.name,
-      overview: r.overview || "",
-      episodes: (r.episodes ?? []).map((e: Raw) => ({
+      overview: r.overview || en?.overview || "",
+      episodes: episodes.map((e: Raw) => ({
         season_number: e.season_number,
         episode_number: e.episode_number,
-        name: e.name,
-        overview: e.overview || "",
+        name: pickName(e.name, enByNumber.get(e.episode_number)?.name, e.episode_number),
+        overview: e.overview || enByNumber.get(e.episode_number)?.overview || "",
         still_path: e.still_path ?? null,
         air_date: e.air_date ?? null,
         runtime: e.runtime ?? null,

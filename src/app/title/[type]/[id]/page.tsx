@@ -6,6 +6,7 @@ import EpisodeCheck from "@/components/EpisodeCheck";
 import LibraryButton from "@/components/LibraryButton";
 import { computeProgress, type Watched } from "@/lib/progress";
 import Notice from "@/components/Notice";
+import { formatLongDate, fromNow } from "@/lib/dates";
 import { getTitle, img, tmdbConfigured, type MediaType } from "@/lib/tmdb";
 import { createClient, getUser } from "@/lib/supabase/server";
 
@@ -76,9 +77,27 @@ export default async function TitlePage({ params }: Props) {
             {poster && <Image src={poster} alt={t.title} fill sizes="224px" className="object-cover" />}
           </div>
           <div className="min-w-0 space-y-3">
+            {t.airing && (
+              <span className="inline-flex items-center gap-2 rounded-full bg-red-500/15 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-red-300 ring-1 ring-red-400/40">
+                <span className="relative flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-red-400" />
+                </span>
+                En emisión
+              </span>
+            )}
             <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">{t.title}</h1>
             {t.tagline && <p className="italic text-white/60">{t.tagline}</p>}
             <p className="text-sm text-white/70">{facts.join(" · ")}</p>
+            {t.next_episode?.air_date ? (
+              <p className="text-sm font-medium text-accent">
+                Nuevo capítulo {fromNow(t.next_episode.air_date)} · T{t.next_episode.season_number} E{t.next_episode.episode_number}
+              </p>
+            ) : t.upcoming_season ? (
+              <p className="text-sm font-medium text-accent">
+                {t.upcoming_season.name} {t.upcoming_season.air_date ? `llega ${fromNow(t.upcoming_season.air_date)}` : "confirmada, sin fecha todavía"}
+              </p>
+            ) : null}
             <div className="flex flex-wrap items-center gap-2">
               {t.vote_average > 0 && (
                 <span className="rounded-full bg-accent/15 px-3 py-1 text-sm font-semibold text-accent">★ {t.vote_average.toFixed(1)}</span>
@@ -181,13 +200,38 @@ export default async function TitlePage({ params }: Props) {
 
         <aside className="space-y-6">
           {t.next_episode && (
-            <div className="rounded-xl bg-panel p-4">
-              <p className="text-xs uppercase tracking-wide text-white/40">Próximo capítulo</p>
+            <Link
+              href={`/title/tv/${t.id}/season/${t.next_episode.season_number}`}
+              className="block rounded-xl bg-accent/10 p-4 ring-1 ring-accent/30 hover:bg-accent/15"
+            >
+              <p className="text-xs uppercase tracking-wide text-accent">Próximo capítulo</p>
               <p className="mt-1 font-medium">
                 T{t.next_episode.season_number} E{t.next_episode.episode_number} · {t.next_episode.name}
               </p>
-              <p className="text-sm text-accent">{t.next_episode.air_date}</p>
-            </div>
+              {t.next_episode.air_date && (
+                <p className="text-sm text-white/70">
+                  <span className="font-semibold text-accent">{capitalize(fromNow(t.next_episode.air_date))}</span> · {formatLongDate(t.next_episode.air_date)}
+                </p>
+              )}
+            </Link>
+          )}
+          {!t.next_episode && t.upcoming_season && (
+            <Link
+              href={`/title/tv/${t.id}/season/${t.upcoming_season.season_number}`}
+              className="block rounded-xl bg-accent/10 p-4 ring-1 ring-accent/30 hover:bg-accent/15"
+            >
+              <p className="text-xs uppercase tracking-wide text-accent">Próxima temporada</p>
+              <p className="mt-1 font-medium">{t.upcoming_season.name}</p>
+              <p className="text-sm text-white/70">
+                {t.upcoming_season.air_date ? (
+                  <>
+                    <span className="font-semibold text-accent">{capitalize(fromNow(t.upcoming_season.air_date))}</span> · {formatLongDate(t.upcoming_season.air_date)}
+                  </>
+                ) : (
+                  "Confirmada, todavía sin fecha"
+                )}
+              </p>
+            </Link>
           )}
           <div className="rounded-xl bg-panel p-4">
             <p className="text-xs uppercase tracking-wide text-white/40">Dónde ver</p>
@@ -212,6 +256,10 @@ export default async function TitlePage({ params }: Props) {
       </div>
     </article>
   );
+}
+
+function capitalize(s: string) {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 const STATUS: Record<string, string> = {
